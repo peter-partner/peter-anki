@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const { extractTextFromPDF } = require('../services/pdfParser');
 const { generateFlashcardsFromChunks } = require('../services/openaiService');
+const { generateVisualCards } = require('../services/imageService');
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) =>
@@ -42,6 +43,7 @@ router.post('/process', upload.single('pdf'), async (req, res) => {
   };
 
   const filePath = req.file.path;
+  const mode = req.body.mode === 'text' ? 'text' : 'visual'; // default: visual
 
   try {
     send('status', { message: 'Extracting text from PDF…', progress: 5 });
@@ -50,8 +52,7 @@ router.post('/process', upload.single('pdf'), async (req, res) => {
 
     if (!text || text.trim().length < 50) {
       send('error', {
-        message:
-          'Could not extract readable text. The PDF may be scanned or image-based.',
+        message: 'Could not extract readable text. The PDF may be scanned or image-based.',
       });
       return res.end();
     }
@@ -62,16 +63,47 @@ router.post('/process', upload.single('pdf'), async (req, res) => {
       'My Deck';
 
     send('status', {
-      message: `Extracted ${pageCount} pages. Sending to AI…`,
+      message: `Extracted ${pageCount} pages. Running ${mode === 'text' ? 'Deep Text' : 'Hybrid Visual'} pipeline…`,
       progress: 15,
     });
 
-    const flashcards = await generateFlashcardsFromChunks(
+    // Text pipeline — progress occupies 15→65% (visual) or 15→95% (text)
+    const textProgressEnd = mode === 'visual' ? 65 : 95;
+    const { cards: textCards, docContext } = await generateFlashcardsFromChunks(
       text,
       (chunkProgress, message) => {
-        send('status', { message, progress: 15 + chunkProgress * 0.8 });
-      }
+        send('status', {
+          message,
+          progress: 15 + (chunkProgress / 100) * (textProgressEnd - 15),
+        });
+      },
+      mode
     );
+
+    let flashcards = textCards;
+
+    // Visual pipeline — progress occupies 65→95%
+    if (mode === 'visual') {
+      send('status', { message: 'Analyzing visual content in PDF…', progress: 65 });
+
+      try {
+        const visualCards = await generateVisualCards(
+          filePath,
+          pageCount,
+          docContext,
+          (p, message) => {
+            send('status', { message, progress: 65 + p * 30 });
+          }
+        );
+
+        if (visualCards.length > 0) {
+          flashcards = [...textCards, ...visualCards];
+          console.log(`Merged ${textCards.length} text + ${visualCards.length} visual = ${flashcards.length} total cards`);
+        }
+      } catch (err) {
+        console.warn('Visual pipeline error (continuing with text cards):', err.message);
+      }
+    }
 
     if (flashcards.length === 0) {
       send('error', {
@@ -80,7 +112,13 @@ router.post('/process', upload.single('pdf'), async (req, res) => {
       return res.end();
     }
 
-    send('complete', { flashcards, deckName, pageCount, totalCards: flashcards.length });
+    send('complete', {
+      flashcards,
+      deckName,
+      pageCount,
+      totalCards: flashcards.length,
+      mode,
+    });
   } catch (err) {
     console.error('Processing error:', err);
     send('error', { message: err.message || 'An unexpected error occurred' });

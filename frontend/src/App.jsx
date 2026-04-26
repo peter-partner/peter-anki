@@ -3,12 +3,14 @@ import Header from './components/Header';
 import DropZone from './components/DropZone';
 import FlashcardEditor from './components/FlashcardEditor';
 import ChangelogModal from './components/ChangelogModal';
+import ModeSelector from './components/ModeSelector';
 
 const STAGE = { IDLE: 'idle', PROCESSING: 'processing', REVIEW: 'review' };
 
 export default function App() {
   const [darkMode, setDarkMode] = useState(false);
   const [showChangelog, setShowChangelog] = useState(false);
+  const [mode, setMode] = useState('visual');
   const [stage, setStage] = useState(STAGE.IDLE);
   const [progress, setProgress] = useState(0);
   const [statusMessage, setStatusMessage] = useState('');
@@ -34,6 +36,7 @@ export default function App() {
     const formData = new FormData();
     formData.append('pdf', file);
     formData.append('deckName', file.name.replace(/\.pdf$/i, ''));
+    formData.append('mode', mode);
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -153,6 +156,7 @@ export default function App() {
               </p>
             </div>
 
+            <ModeSelector mode={mode} onChange={setMode} />
             <DropZone onFileSelect={handleFileUpload} />
 
             {error && (

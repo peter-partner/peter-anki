@@ -1,8 +1,20 @@
 export const VERSIONS = [
   {
-    version: '1.2.0',
+    version: '1.3.0',
     date: 'Apr 26, 2026',
     label: 'latest',
+    changes: [
+      'Dual-mode generation: Hybrid Visual and Deep Text',
+      'Hybrid Visual mode: text cards + GPT-4o Vision analysis of diagrams and figures',
+      'Deep Text mode: maximum card density with aggressive concept decomposition',
+      'Comparison, mechanism-chain, and cause-effect card types in Deep Text mode',
+      'Mode selector shown on upload screen — switch before uploading',
+      'Mode-aware progress messages and density targets',
+    ],
+  },
+  {
+    version: '1.2.0',
+    date: 'Apr 26, 2026',
     changes: [
       'Scalable card output: small PDFs → 20–40 cards, large PDFs → 80–150 cards',
       'Two-stage AI pipeline per chunk: summarize first, then generate cards',
