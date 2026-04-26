@@ -2,11 +2,13 @@ import { useState, useCallback, useRef } from 'react';
 import Header from './components/Header';
 import DropZone from './components/DropZone';
 import FlashcardEditor from './components/FlashcardEditor';
+import ChangelogModal from './components/ChangelogModal';
 
 const STAGE = { IDLE: 'idle', PROCESSING: 'processing', REVIEW: 'review' };
 
 export default function App() {
   const [darkMode, setDarkMode] = useState(false);
+  const [showChangelog, setShowChangelog] = useState(false);
   const [stage, setStage] = useState(STAGE.IDLE);
   const [progress, setProgress] = useState(0);
   const [statusMessage, setStatusMessage] = useState('');
@@ -132,7 +134,10 @@ export default function App() {
         onToggleDark={toggleDarkMode}
         onReset={stage !== STAGE.IDLE ? handleReset : null}
         stage={stage}
+        onShowChangelog={() => setShowChangelog(true)}
       />
+
+      {showChangelog && <ChangelogModal onClose={() => setShowChangelog(false)} />}
 
       <main className="max-w-5xl mx-auto px-4 sm:px-6 py-12">
         {/* ── IDLE ── */}
