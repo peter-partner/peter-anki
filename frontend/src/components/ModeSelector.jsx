@@ -7,9 +7,9 @@ const MODES = [
   },
   {
     id: 'text',
-    icon: '📚',
-    label: 'Deep Text',
-    desc: 'Maximum card density — every concept broken down to its core',
+    icon: '⚡',
+    label: 'Text Only',
+    desc: 'Text cards only — faster, no image processing',
   },
 ];
 

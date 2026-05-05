@@ -175,7 +175,7 @@ export default function App() {
                 {
                   icon: '🤖',
                   title: 'AI Processing',
-                  desc: 'GPT-4o mini extracts key concepts and builds Q&A pairs',
+                  desc: 'Generates focused flashcards directly from your content',
                 },
                 {
                   icon: '🎯',
