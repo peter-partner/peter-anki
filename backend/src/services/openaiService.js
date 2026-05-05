@@ -3,25 +3,13 @@ const OpenAI = require('openai');
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const WORDS_PER_CHUNK = 600;
-const MAX_CHUNKS = 30;
-const ANALYSIS_MAX_WORDS = 3000;
+const WORDS_PER_CARD  = 150; // 1 card per ~150 words of source text
+const MAX_CARDS       = 80;
+const MIN_PER_CHUNK   = 3;
+const MAX_PER_CHUNK   = 6;
 
-// Visual mode: moderate density (text cards supplemented by visual cards)
-// Text mode: high density, aggressive decomposition
-const MODE_CONFIG = {
-  visual: { tokensPerCard: 100, minCards: 20, maxCards: 100, minPerChunk: 4, maxPerChunk: 8 },
-  text:   { tokensPerCard: 55,  minCards: 30, maxCards: 150, minPerChunk: 6, maxPerChunk: 12 },
-};
-
-function estimateTokens(text) {
-  return Math.round(text.split(/\s+/).length * 1.33);
-}
-
-function computeTargetCards(totalTokens, numChunks, mode) {
-  const cfg = MODE_CONFIG[mode] ?? MODE_CONFIG.visual;
-  const raw = Math.round(totalTokens / cfg.tokensPerCard);
-  const total = Math.max(cfg.minCards, Math.min(cfg.maxCards, raw));
-  return { total, cfg };
+function countWords(text) {
+  return text.split(/\s+/).filter(Boolean).length;
 }
 
 function chunkText(text) {
@@ -43,7 +31,7 @@ function chunkText(text) {
   }
 
   if (current.trim()) chunks.push(current.trim());
-  return chunks.slice(0, MAX_CHUNKS);
+  return chunks;
 }
 
 function deduplicateCards(cards) {
@@ -69,204 +57,29 @@ function deduplicateCards(cards) {
   });
 }
 
-async function analyzeDocument(text) {
-  const sample = text.split(/\s+/).slice(0, ANALYSIS_MAX_WORDS).join(' ');
+const SYSTEM_PROMPT =
+  'You are an Anki flashcard expert. Create clear, atomic flashcards from study material.\n' +
+  'Rules: one idea per card, questions answerable in under 10 seconds, no vague stems like "Explain" or "Describe".\n' +
+  'Output ONLY a valid JSON array. No markdown, no commentary.';
 
-  const response = await client.chat.completions.create({
-    model: 'gpt-4o',
-    messages: [
-      {
-        role: 'system',
-        content: 'You are an expert educator. Analyze documents to identify their subject, domain, and learning objectives.',
-      },
-      {
-        role: 'user',
-        content: `Analyze this document excerpt and return ONLY a valid JSON object (no markdown, no commentary):
-{
-  "subject_area": "specific subject, e.g. 'Cardiology — Heart Failure'",
-  "is_medical": true or false,
-  "is_scientific": true or false,
-  "core_themes": ["theme1", "theme2"],
-  "key_concepts": ["concept1", "concept2"],
-  "exam_focus": "one sentence describing what a student is typically tested on"
-}
-
-DOCUMENT EXCERPT:
-${sample}`,
-      },
-    ],
-    temperature: 0.1,
-    max_tokens: 400,
-  });
-
-  const raw = (response.choices[0]?.message?.content ?? '').trim();
-  const match = raw.match(/\{[\s\S]*\}/);
-  if (!match) return null;
-
-  try {
-    return JSON.parse(match[0]);
-  } catch {
-    return null;
-  }
-}
-
-async function summarizeChunk(text) {
+async function generateCardsForChunk(text, targetCards) {
   const response = await client.chat.completions.create({
     model: 'gpt-4o-mini',
     messages: [
-      {
-        role: 'system',
-        content: 'You are an expert educator. Extract structured learning content from text.',
-      },
+      { role: 'system', content: SYSTEM_PROMPT },
       {
         role: 'user',
-        content: `Analyze this text and return ONLY a valid JSON object (no markdown):
-{
-  "summary": "2–3 sentence summary",
-  "core_concepts": ["concept1", "concept2"],
-  "mechanisms": ["mechanism1"],
-  "relationships": ["A causes B", "X leads to Y"],
-  "high_yield_facts": ["fact1", "fact2", "fact3"]
-}
-
-TEXT:
-${text}`,
+        content:
+          `Make ${targetCards} Anki flashcards from this text.\n` +
+          `Use basic cards for facts and definitions. Use cloze for lists and sequences.\n\n` +
+          `Basic: {"type":"basic","front":"Question?","back":"Answer.","tags":["topic"]}\n` +
+          `Cloze: {"type":"cloze","front":"The {{c1::term}} does X.","back":"","tags":["topic"]}\n\n` +
+          `TEXT:\n${text}\n\n` +
+          `Return ONLY: [{"type":"basic"|"cloze","front":"...","back":"...","tags":["..."]}]`,
       },
     ],
-    temperature: 0.1,
-    max_tokens: 500,
-  });
-
-  const raw = (response.choices[0]?.message?.content ?? '').trim();
-  const match = raw.match(/\{[\s\S]*\}/);
-  if (!match) return null;
-
-  try {
-    return JSON.parse(match[0]);
-  } catch {
-    return null;
-  }
-}
-
-function buildSystemPrompt(mode, targetCards) {
-  const isText = mode === 'text';
-  const maxTarget = isText ? Math.min(targetCards + 4, 12) : Math.min(targetCards + 2, 8);
-
-  const quantityRules = isText
-    ? `QUANTITY RULES — DEEP TEXT MODE (CRITICAL):
-- Target ${targetCards}–${maxTarget} cards for this chunk
-- NEVER return fewer than 6 cards unless the chunk has fewer than 3 distinct concepts
-- Decompose concepts to maximal useful granularity
-- Break multi-step mechanisms into individual atomic cards
-- Prefer slightly more cards over missing important nuance
-- Cover secondary details if clinically or academically relevant
-- Cover ALL major AND supporting concepts before stopping`
-    : `QUANTITY RULES — HYBRID VISUAL MODE:
-- Target ${targetCards}–${maxTarget} cards for this chunk
-- Keep density moderate — visual diagram cards supplement this output
-- NEVER return fewer than 4 cards unless the chunk has fewer than 3 concepts
-- Cover ALL major concepts before stopping`;
-
-  const cardTypes = isText
-    ? `CARD TYPE SELECTION — be exhaustive:
-• Basic (Q/A)    → definitions, facts, single relationships, clinical presentations
-• Cloze          → lists, sequences, pathways, terminology in context
-• Comparison     → "How does X differ from Y in context Z?" (basic format)
-• Mechanism      → "What is the mechanism by which X causes Y?" — split into atomic steps
-• Cause-Effect   → "What is the consequence of X?" — one consequence per card`
-    : `CARD TYPE SELECTION:
-• Basic (Q/A)  → definitions, facts, single relationships, clinical presentations
-• Cloze        → lists, sequences, pathways, comparisons, key terminology in context`;
-
-  return `You are a world-class Anki deck creator trained in cognitive science, spaced repetition, and medical education.
-
-CORE RULES (non-negotiable):
-1. Minimum Information Principle — exactly ONE idea per card, always
-2. Questions must be specific, atomic, and answerable in under 10 seconds
-3. Never use vague stems like "Explain...", "Describe...", "What do you know about..."
-4. Prioritize understanding mechanisms and cause–effect over rote memorization
-5. Break complex topics into multiple focused cards rather than one dense card
-
-${quantityRules}
-
-${cardTypes}
-
-FORMATS:
-Basic: {"type":"basic","front":"Specific question?","back":"Concise answer.","tags":["topic"]}
-Cloze: {"type":"cloze","front":"The {{c1::key term}} does X in Y context.","back":"","tags":["topic"]}
-Multi-cloze: {{c1::first}} and {{c2::second}} for independent testable slots.
-
-SELF-VALIDATION per card:
-✓ Answerable in <10 seconds?
-✓ Tests exactly ONE idea?
-✓ Unambiguous — only one correct answer?
-✓ Worth knowing for a high-performing student?
-Revise or discard if any answer is NO.
-
-OUTPUT: Return ONLY a valid JSON array. No markdown fences, no commentary.`;
-}
-
-async function generateFlashcardsForChunk(text, chunkSummary, docContext, targetCards, mode) {
-  const isText = mode === 'text';
-
-  const contextBlock = docContext
-    ? `DOCUMENT CONTEXT:
-Subject: ${docContext.subject_area}
-Core Themes: ${(docContext.core_themes ?? []).join(', ')}
-Exam Focus: ${docContext.exam_focus}
-
-`
-    : '';
-
-  const summaryBlock = chunkSummary
-    ? `CHUNK ANALYSIS — use this to guide card selection:
-Summary: ${chunkSummary.summary}
-Core Concepts: ${(chunkSummary.core_concepts ?? []).join(', ')}
-Mechanisms: ${(chunkSummary.mechanisms ?? []).join(', ')}
-Key Relationships: ${(chunkSummary.relationships ?? []).join(', ')}
-High-Yield Facts: ${(chunkSummary.high_yield_facts ?? []).join(', ')}
-
-`
-    : '';
-
-  const medicalLayer =
-    docContext?.is_medical || docContext?.is_scientific
-      ? `MEDICAL/SCIENTIFIC CONTENT — apply these extra rules:
-- Prioritize pathophysiology, mechanisms of action, and clinical correlations
-- Include classic presentations, diagnostic clues, and first-line treatments
-- Create "pitfall" cards where student confusion is common (tag: "pitfall")
-- Focus on high-yield exam facts; skip low-yield trivia
-- Use mnemonics ONLY when genuinely more efficient than a plain card
-
-`
-      : '';
-
-  const maxTarget = isText ? Math.min(targetCards + 4, 12) : Math.min(targetCards + 2, 8);
-
-  const instruction = isText
-    ? `Generate ${targetCards}–${maxTarget} expert-quality Anki flashcards from the text below.
-
-DEEP TEXT MODE: Be exhaustive. Decompose every concept to its most granular testable form. Break mechanisms into atomic steps. Create comparison and cause-effect cards. Cover secondary details if relevant.`
-    : `Generate ${targetCards}–${maxTarget} expert-quality Anki flashcards from the text below.
-
-HYBRID VISUAL MODE: Focus on core concepts. Diagram-based visual cards will supplement this output — avoid duplicating what's better shown visually.`;
-
-  const response = await client.chat.completions.create({
-    model: 'gpt-4o',
-    messages: [
-      { role: 'system', content: buildSystemPrompt(mode, targetCards) },
-      {
-        role: 'user',
-        content: `${contextBlock}${summaryBlock}${medicalLayer}${instruction}
-
-TEXT:
-${text}
-
-Return ONLY: [{"type":"basic"|"cloze","front":"...","back":"...","tags":["..."]}]`,
-      },
-    ],
-    temperature: isText ? 0.4 : 0.35,
-    max_tokens: isText ? 4000 : 3500,
+    temperature: 0.3,
+    max_tokens: 2000,
   });
 
   const raw = (response.choices[0]?.message?.content ?? '').trim();
@@ -281,49 +94,29 @@ Return ONLY: [{"type":"basic"|"cloze","front":"...","back":"...","tags":["..."]}
   }
 }
 
-// Returns { cards, docContext } so the route can share context with the visual pipeline
-async function generateFlashcardsFromChunks(text, onProgress, mode = 'visual') {
+async function generateFlashcardsFromChunks(text, onProgress, _mode = 'visual') {
   const chunks = chunkText(text);
-  const totalTokens = estimateTokens(text);
-  const { total: targetTotal, cfg } = computeTargetCards(totalTokens, chunks.length, mode);
+  const totalWords = countWords(text);
+
+  // Budget: 1 card per WORDS_PER_CARD words, capped at MAX_CARDS
+  const targetTotal = Math.min(MAX_CARDS, Math.max(MIN_PER_CHUNK, Math.round(totalWords / WORDS_PER_CARD)));
+
+  // Spread budget evenly; each chunk always gets at least MIN_PER_CHUNK cards
+  const perChunk = Math.max(MIN_PER_CHUNK, Math.min(MAX_PER_CHUNK, Math.ceil(targetTotal / chunks.length)));
+
   const allCards = [];
   let lastError = null;
 
-  console.log(`[${mode.toUpperCase()} MODE] ~${totalTokens} tokens, ${chunks.length} chunks, target ${targetTotal} cards`);
-
-  onProgress(0, 'Analyzing document…');
-  let docContext = null;
-  try {
-    docContext = await analyzeDocument(text);
-  } catch (err) {
-    console.warn('Document analysis skipped:', err.message);
-  }
+  console.log(`~${totalWords} words, ${chunks.length} chunks, target ${targetTotal} cards (${perChunk}/chunk)`);
 
   for (let i = 0; i < chunks.length; i++) {
-    const remaining = targetTotal - allCards.length;
-    const chunksLeft = chunks.length - i;
-    const dynamicTarget = Math.max(
-      cfg.minPerChunk,
-      Math.min(cfg.maxPerChunk, Math.ceil(remaining / chunksLeft))
-    );
-
     onProgress(
       (i / chunks.length) * 100,
       `Processing section ${i + 1} of ${chunks.length}…`
     );
 
     try {
-      let chunkSummary = null;
-      try {
-        chunkSummary = await summarizeChunk(chunks[i]);
-      } catch (err) {
-        console.warn(`Chunk ${i + 1} summary skipped:`, err.message);
-      }
-
-      const cards = await generateFlashcardsForChunk(
-        chunks[i], chunkSummary, docContext, dynamicTarget, mode
-      );
-
+      const cards = await generateCardsForChunk(chunks[i], perChunk);
       allCards.push(
         ...cards
           .map((c, j) => ({
@@ -352,11 +145,11 @@ async function generateFlashcardsFromChunks(text, onProgress, mode = 'visual') {
     throw new Error(`OpenAI error: ${lastError.message}`);
   }
 
-  const deduplicated = deduplicateCards(allCards);
-  console.log(`Text cards: ${allCards.length} → ${deduplicated.length} after deduplication`);
+  const deduplicated = deduplicateCards(allCards).slice(0, MAX_CARDS);
+  console.log(`Cards: ${allCards.length} raw → ${deduplicated.length} after dedup/cap`);
 
-  onProgress(100, 'Text analysis complete!');
-  return { cards: deduplicated, docContext };
+  onProgress(100, 'Done!');
+  return { cards: deduplicated, docContext: null };
 }
 
 module.exports = { generateFlashcardsFromChunks };

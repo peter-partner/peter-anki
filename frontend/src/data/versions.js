@@ -1,8 +1,20 @@
 export const VERSIONS = [
   {
+    version: '1.4.0',
+    date: 'May 5, 2026',
+    label: 'latest',
+    changes: [
+      'Rebuilt AI pipeline — single direct call per chunk (was 3 calls)',
+      'Switched to gpt-4o-mini for all text cards — ~10x cheaper, ~3x faster',
+      'Budget-based card count: 1 card per 150 words, capped at 80 total',
+      'Removed 30-chunk hard cap — all content processed evenly across document',
+      'Dropped pre-summarization and document analysis passes',
+      'Lean system prompt replaces 400-token instruction block',
+    ],
+  },
+  {
     version: '1.3.0',
     date: 'Apr 26, 2026',
-    label: 'latest',
     changes: [
       'Dual-mode generation: Hybrid Visual and Deep Text',
       'Hybrid Visual mode: text cards + GPT-4o Vision analysis of diagrams and figures',
