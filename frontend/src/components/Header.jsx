@@ -29,7 +29,7 @@ export default function Header({ darkMode, onToggleDark, onReset, stage, onShowC
             className="px-2.5 py-1 text-xs font-medium text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
             aria-label="What's new"
           >
-            v1.2.0
+            v1.3.0
           </button>
 
           <button
