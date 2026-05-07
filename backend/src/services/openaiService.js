@@ -2,15 +2,10 @@ const OpenAI = require('openai');
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const WORDS_PER_CHUNK = 600;
-const WORDS_PER_CARD  = 150; // 1 card per ~150 words of source text
-const MAX_CARDS       = 80;
-const MIN_PER_CHUNK   = 3;
-const MAX_PER_CHUNK   = 6;
+const WORDS_PER_CHUNK = 1200; // large enough to capture a full topic section
+const MAX_CARDS       = 300;  // exhaustive decks can be large
 
-function countWords(text) {
-  return text.split(/\s+/).filter(Boolean).length;
-}
+// ─── Chunking ────────────────────────────────────────────────────────────────
 
 function chunkText(text) {
   const paragraphs = text.split(/\n\n+/);
@@ -34,52 +29,90 @@ function chunkText(text) {
   return chunks;
 }
 
+// ─── Deduplication (Jaccard on question stems) ───────────────────────────────
+
 function deduplicateCards(cards) {
   const seen = [];
 
-  function normalize(str) {
-    return str.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
-  }
+  const normalize = (s) =>
+    s.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
 
-  function jaccardSimilarity(a, b) {
-    const setA = new Set(a.split(' '));
-    const setB = new Set(b.split(' '));
-    const intersection = [...setA].filter((w) => setB.has(w)).length;
-    const union = new Set([...setA, ...setB]).size;
-    return union === 0 ? 0 : intersection / union;
-  }
+  const jaccard = (a, b) => {
+    const A = new Set(a.split(' '));
+    const B = new Set(b.split(' '));
+    const inter = [...A].filter((w) => B.has(w)).length;
+    const union = new Set([...A, ...B]).size;
+    return union === 0 ? 0 : inter / union;
+  };
 
   return cards.filter((card) => {
     const norm = normalize(card.front);
-    const isDuplicate = seen.some((s) => jaccardSimilarity(norm, s) >= 0.85);
-    if (!isDuplicate) seen.push(norm);
-    return !isDuplicate;
+    const isDup = seen.some((s) => jaccard(norm, s) >= 0.85);
+    if (!isDup) seen.push(norm);
+    return !isDup;
   });
 }
 
-const SYSTEM_PROMPT =
-  'You are an Anki flashcard expert. Create clear, atomic flashcards from study material.\n' +
-  'Rules: one idea per card, questions answerable in under 10 seconds, no vague stems like "Explain" or "Describe".\n' +
-  'Output ONLY a valid JSON array. No markdown, no commentary.';
+// ─── Prompts ─────────────────────────────────────────────────────────────────
 
-async function generateCardsForChunk(text, targetCards) {
+const SYSTEM_PROMPT = `You are a medical flashcard expert producing high-yield Anki decks.
+Your goal is EXHAUSTIVE, ATOMIC coverage — one card per distinct testable fact.
+
+COVERAGE — generate a card for every:
+  definition, classification, cause/etiology, sign/symptom, diagnostic criterion,
+  management step, drug name and dose, numeric threshold/value, named sign or maneuver,
+  risk factor, complication, and prevention strategy present in the text.
+Target yield: 8–12 cards per major topic section. Do NOT skip or merge facts.
+
+ATOMICITY — one fact per card:
+  - If a topic has causes, signs, AND treatment → three separate cards.
+  - Sub-parts (early vs late, mild/moderate/severe) → one card per sub-part.
+
+QUESTION PHRASING — use these stems:
+  "What is…"            → definitions, descriptions, mechanisms
+  "What are…"           → lists (causes, signs, treatments, risk factors)
+  "What is the [x]…"   → specific numeric or clinical values (doses, thresholds)
+  "List some…"          → long open-ended enumerations
+  Questions must be self-contained and clinically specific without the source text.
+
+ANSWER FORMAT — strictly comma-separated plain text:
+  ✓ Correct:  "Tachypnea, tachycardia, arrhythmia, cyanosis, confusion"
+  ✗ Wrong:    "1. Tachypnea 2. Tachycardia 3. Arrhythmia"
+  ✗ Wrong:    "- Tachypnea\\n- Tachycardia"
+  Single-answer cards: plain sentence or value — "PaO2 < 60 mmHg or SaO2 < 90%"
+  Categorised lists: inline label — "Mild: A, B, Moderate: C, D, Severe: E"
+
+DO NOT:
+  - Add tags (always use empty array [])
+  - Create learning-objective or bibliographic reference cards
+  - Duplicate or near-duplicate questions (same question phrased differently)
+
+Output ONLY a valid JSON array. No markdown fences, no commentary.`;
+
+const buildUserPrompt = (text) =>
+  `Generate Anki flashcards from the text below.
+
+Be EXHAUSTIVE — cover every definition, classification, cause, sign/symptom, management step,
+drug dose, numeric threshold, named sign/maneuver, risk factor, complication, and prevention strategy.
+Target 8–12 cards per major topic section. Do NOT summarise or skip sections.
+
+Return ONLY this JSON (no other text):
+[{"front":"Question?","back":"Answer.","tags":[]}]
+
+TEXT:
+${text}`;
+
+// ─── API call ─────────────────────────────────────────────────────────────────
+
+async function generateCardsForChunk(text) {
   const response = await client.chat.completions.create({
     model: 'gpt-4o-mini',
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },
-      {
-        role: 'user',
-        content:
-          `Make ${targetCards} Anki flashcards from this text.\n` +
-          `Use basic cards for facts and definitions. Use cloze for lists and sequences.\n\n` +
-          `Basic: {"type":"basic","front":"Question?","back":"Answer.","tags":["topic"]}\n` +
-          `Cloze: {"type":"cloze","front":"The {{c1::term}} does X.","back":"","tags":["topic"]}\n\n` +
-          `TEXT:\n${text}\n\n` +
-          `Return ONLY: [{"type":"basic"|"cloze","front":"...","back":"...","tags":["..."]}]`,
-      },
+      { role: 'user',   content: buildUserPrompt(text) },
     ],
-    temperature: 0.3,
-    max_tokens: 2000,
+    temperature: 0.2, // lower = more deterministic, less hallucination
+    max_tokens: 4096,
   });
 
   const raw = (response.choices[0]?.message?.content ?? '').trim();
@@ -94,20 +127,14 @@ async function generateCardsForChunk(text, targetCards) {
   }
 }
 
+// ─── Main export ──────────────────────────────────────────────────────────────
+
 async function generateFlashcardsFromChunks(text, onProgress, _mode = 'visual') {
   const chunks = chunkText(text);
-  const totalWords = countWords(text);
-
-  // Budget: 1 card per WORDS_PER_CARD words, capped at MAX_CARDS
-  const targetTotal = Math.min(MAX_CARDS, Math.max(MIN_PER_CHUNK, Math.round(totalWords / WORDS_PER_CARD)));
-
-  // Spread budget evenly; each chunk always gets at least MIN_PER_CHUNK cards
-  const perChunk = Math.max(MIN_PER_CHUNK, Math.min(MAX_PER_CHUNK, Math.ceil(targetTotal / chunks.length)));
-
   const allCards = [];
   let lastError = null;
 
-  console.log(`~${totalWords} words, ${chunks.length} chunks, target ${targetTotal} cards (${perChunk}/chunk)`);
+  console.log(`Chunked into ${chunks.length} sections (exhaustive mode)`);
 
   for (let i = 0; i < chunks.length; i++) {
     onProgress(
@@ -116,37 +143,33 @@ async function generateFlashcardsFromChunks(text, onProgress, _mode = 'visual') 
     );
 
     try {
-      const cards = await generateCardsForChunk(chunks[i], perChunk);
+      const cards = await generateCardsForChunk(chunks[i]);
       allCards.push(
         ...cards
           .map((c, j) => ({
             id: `${Date.now()}-${i}-${j}`,
-            type: c.type || 'basic',
             front: (c.front ?? '').trim(),
-            back: (c.back ?? '').trim(),
-            tags: Array.isArray(c.tags) ? c.tags : [],
+            back:  (c.back  ?? '').trim(),
+            tags:  [],  // always empty per spec
           }))
-          .filter((c) => c.front)
+          .filter((c) => c.front && c.back)
       );
     } catch (err) {
       lastError = err;
       console.error(`Chunk ${i + 1} failed:`, err.message);
 
-      if (err.status === 401 || err.status === 403) {
+      if (err.status === 401 || err.status === 403)
         throw new Error('Invalid OpenAI API key. Check your backend/.env file.');
-      }
-      if (err.status === 429) {
+      if (err.status === 429)
         throw new Error('OpenAI quota exceeded. Add billing credits at platform.openai.com/settings/billing');
-      }
     }
   }
 
-  if (allCards.length === 0 && lastError) {
+  if (allCards.length === 0 && lastError)
     throw new Error(`OpenAI error: ${lastError.message}`);
-  }
 
   const deduplicated = deduplicateCards(allCards).slice(0, MAX_CARDS);
-  console.log(`Cards: ${allCards.length} raw → ${deduplicated.length} after dedup/cap`);
+  console.log(`Cards: ${allCards.length} raw → ${deduplicated.length} after dedup`);
 
   onProgress(100, 'Done!');
   return { cards: deduplicated, docContext: null };
